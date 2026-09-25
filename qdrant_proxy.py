@@ -121,12 +121,12 @@ async def search(req: SearchRequest, request: Request):
 
     # 2. Поиск в Qdrant
     try:
-        results = qdrant.search(
+        results = qdrant.query_points(
             collection_name=COLLECTION_NAME,
-            query_vector=vector,
+            query=vector,
             limit=limit,
             with_payload=True,
-        )
+        ).points
     except Exception as e:
         print(f"❌ Qdrant error: {e}")
         raise HTTPException(status_code=502, detail=f"Qdrant error: {e}")
