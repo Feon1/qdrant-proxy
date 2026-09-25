@@ -18,18 +18,13 @@ DEFAULT_LIMIT = int(os.getenv("DEFAULT_LIMIT", "5"))
 MAX_LIMIT = int(os.getenv("MAX_LIMIT", "20"))
 PROXY_TOKEN = os.getenv("PROXY_TOKEN", "")
 
-# Провайдер эмбеддингов: "polza" (OpenAI-совместимый) или "jina"
-EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "polza").lower()
-
-# Polza AI (OpenAI-совместимый эндпоинт)
-POLZA_API_KEY = os.getenv("POLZA_EMBEDDING_API_KEY") or os.getenv("POLZA_API_KEY")
-POLZA_BASE_URL = os.getenv("POLZA_BASE_URL", "https://api.polza.ai/api/v1")
-POLZA_MODEL = os.getenv("POLZA_EMBED_MODEL", "text-embedding-3-small")
-
-# Jina AI (если понадобится переключиться)
-JINA_API_KEY = os.getenv("JINA_API_KEY")
-JINA_API_URL = os.getenv("JINA_API_URL", "https://api.jina.ai/v1/embeddings")
-JINA_MODEL = os.getenv("JINA_MODEL", "jina-embeddings-v3")
+# Polza AI — эмбеддинги
+POLZA_EMBEDDING_URL = os.getenv(
+    "POLZA_EMBEDDING_URL",
+    "https://polza.ai/api/v1/embeddings"
+)
+POLZA_EMBEDDING_API_KEY = os.getenv("POLZA_EMBEDDING_API_KEY")
+POLZA_EMBED_MODEL = os.getenv("POLZA_EMBED_MODEL", "text-embedding-3-small")
 
 # Размерность вектора — ДОЛЖНА СОВПАДАТЬ с коллекцией Qdrant!
 EMBED_DIM = int(os.getenv("EMBED_DIM", "1536"))
@@ -63,65 +58,41 @@ def check_token(request: Request):
 
 
 # ============================================================
-# EMBEDDINGS
+# EMBEDDINGS через Polza AI (OpenAI-совместимый)
 # ============================================================
-async def embed_polza(text: str) -> list[float]:
-    """Эмбеддинг через Polza AI (OpenAI-совместимый /embeddings)."""
-    if not POLZA_API_KEY:
+async def embed(text: str) -> list[float]:
+    """Эмбеддинг через Polza AI."""
+    if not POLZA_EMBEDDING_API_KEY:
         raise RuntimeError("POLZA_EMBEDDING_API_KEY не задан")
 
     headers = {
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {POLZA_API_KEY}",
+        "Authorization": f"Bearer {POLZA_EMBEDDING_API_KEY}",
     }
     payload = {
-        "model": POLZA_MODEL,
-        "input": [text],
+        "model": POLZA_EMBED_MODEL,
+        "input": text,
     }
-    # dimensions передаём только если нужно явно указать (не 1536 по умолчанию)
-    if EMBED_DIM and EMBED_DIM != 1536:
-        payload["dimensions"] = EMBED_DIM
 
     async with httpx.AsyncClient(timeout=60.0) as client:
-        r = await client.post(
-            f"{POLZA_BASE_URL}/embeddings",
-            headers=headers,
-            json=payload,
-        )
+        r = await client.post(POLZA_EMBEDDING_URL, headers=headers, json=payload)
         if r.status_code != 200:
-            raise RuntimeError(f"Polza API error {r.status_code}: {r.text[:200]}")
+            raise RuntimeError(f"Polza API error {r.status_code}: {r.text[:300]}")
         data = r.json()
-        return data["data"][0]["embedding"]
 
+        # Логируем структуру ответа для отладки
+        print(f"📥 Polza response keys: {list(data.keys())}")
 
-async def embed_jina(text: str) -> list[float]:
-    """Эмбеддинг через Jina AI."""
-    if not JINA_API_KEY:
-        raise RuntimeError("JINA_API_KEY не задан")
+        # OpenAI-совместимый формат
+        if "data" in data and len(data["data"]) > 0:
+            return data["data"][0]["embedding"]
+        # Альтернативный формат (если Polza вернёт иначе)
+        if "embedding" in data:
+            return data["embedding"]
+        if "embeddings" in data and len(data["embeddings"]) > 0:
+            return data["embeddings"][0]
 
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {JINA_API_KEY}",
-    }
-    payload = {
-        "model": JINA_MODEL,
-        "input": [text],
-        "task": "text-matching",
-        "dimensions": EMBED_DIM,
-    }
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        r = await client.post(JINA_API_URL, headers=headers, json=payload)
-        if r.status_code != 200:
-            raise RuntimeError(f"Jina API error {r.status_code}: {r.text[:200]}")
-        data = r.json()
-        return data["data"][0]["embedding"]
-
-
-async def embed(text: str) -> list[float]:
-    """Роутер провайдеров."""
-    if EMBEDDING_PROVIDER == "jina":
-        return await embed_jina(text)
-    return await embed_polza(text)
+        raise RuntimeError(f"Неожиданный формат ответа Polza: {list(data.keys())}")
 
 
 # ============================================================
@@ -145,7 +116,6 @@ async def search(req: SearchRequest, request: Request):
 
     print(f"🔍 [{request.client.host}] query='{req.query[:60]}' limit={limit} dim={len(vector)}")
 
-    # Проверка размерности — критично!
     if len(vector) != EMBED_DIM:
         print(f"⚠️ Размерность не совпадает: получено {len(vector)}, ожидалось {EMBED_DIM}")
 
@@ -185,9 +155,8 @@ async def health():
         cols = qdrant.get_collections()
         return {
             "status": "ok",
-            "provider": EMBEDDING_PROVIDER,
-            "dim": EMBED_DIM,
             "collection": COLLECTION_NAME,
+            "dim": EMBED_DIM,
             "collections_count": len(cols.collections),
         }
     except Exception as e:
@@ -218,8 +187,8 @@ if __name__ == "__main__":
     port = int(os.getenv("PORT", 8200))
     print("=" * 60)
     print(f"  Qdrant Read-Only Proxy (port {port})")
-    print(f"  Provider: {EMBEDDING_PROVIDER}")
     print(f"  Collection: {COLLECTION_NAME}")
     print(f"  Dim: {EMBED_DIM}")
+    print(f"  Polza URL: {POLZA_EMBEDDING_URL}")
     print("=" * 60)
     uvicorn.run(app, host="0.0.0.0", port=port)
