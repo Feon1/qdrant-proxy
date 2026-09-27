@@ -150,17 +150,8 @@ async def search(req: SearchRequest, request: Request):
 
 
 @app.get("/health")
-async def health():
-    try:
-        cols = qdrant.get_collections()
-        return {
-            "status": "ok",
-            "collection": COLLECTION_NAME,
-            "dim": EMBED_DIM,
-            "collections_count": len(cols.collections),
-        }
-    except Exception as e:
-        return {"status": "error", "detail": str(e)}
+def health():
+    return {"status": "ok"}
 
 
 @app.get("/collections")
